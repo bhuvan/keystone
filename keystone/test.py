@@ -29,6 +29,7 @@ from keystone.common import kvs
 from keystone.common import logging
 from keystone.common import utils
 from keystone.common import wsgi
+from keystone.openstack.common import importutils
 
 
 LOG = logging.getLogger(__name__)
@@ -116,7 +117,45 @@ class TestClient(object):
         return self.request('PUT', path=path, headers=headers, body=body)
 
 
-class TestCase(unittest.TestCase):
+class NoModule(object):
+    """A mixin class to provide support for unloading/disabling modules."""
+
+    def __init__(self, *args, **kw):
+        super(NoModule, self).__init__(*args, **kw)
+        self._finders = []
+        self._cleared_modules = {}
+
+    def tearDown(self):
+        super(NoModule, self).tearDown()
+        for finder in self._finders:
+            sys.meta_path.remove(finder)
+        sys.modules.update(self._cleared_modules)
+
+    def clear_module(self, module):
+        cleared_modules = {}
+        for fullname in sys.modules.keys():
+            if fullname == module or fullname.startswith(module + '.'):
+                cleared_modules[fullname] = sys.modules.pop(fullname)
+        return cleared_modules
+
+    def disable_module(self, module):
+        """Ensure ImportError for the specified module."""
+
+        # Clear 'module' references in sys.modules
+        self._cleared_modules.update(self.clear_module(module))
+
+        # Disallow further imports of 'module'
+        class NoModule(object):
+            def find_module(self, fullname, path):
+                if fullname == module or fullname.startswith(module + '.'):
+                    raise ImportError
+
+        finder = NoModule()
+        self._finders.append(finder)
+        sys.meta_path.insert(0, finder)
+
+
+class TestCase(NoModule, unittest.TestCase):
     def __init__(self, *args, **kw):
         super(TestCase, self).__init__(*args, **kw)
         self._paths = []
@@ -146,35 +185,21 @@ class TestCase(unittest.TestCase):
                 if path in sys.path:
                     sys.path.remove(path)
             kvs.INMEMDB.clear()
-            self.reset_opts()
+            CONF.reset()
 
     def opt_in_group(self, group, **kw):
         for k, v in kw.iteritems():
             CONF.set_override(k, v, group)
-        if group not in self._group_overrides:
-            self._group_overrides[group] = []
-        self._group_overrides[group].append(k)
 
     def opt(self, **kw):
         for k, v in kw.iteritems():
             CONF.set_override(k, v)
-        self._overrides.append(k)
-
-    def reset_opts(self):
-        for group, opt_list in self._group_overrides.iteritems():
-            for k in opt_list:
-                CONF.set_override(k, None, group)
-        for k in self._overrides:
-            CONF.set_override(k, None)
-        self._overrides = []
-        self._group_overrides = {}
-        CONF.reset()
 
     def load_backends(self):
         """Hacky shortcut to load the backends for data manipulation."""
-        self.identity_api = utils.import_object(CONF.identity.driver)
-        self.token_api = utils.import_object(CONF.token.driver)
-        self.catalog_api = utils.import_object(CONF.catalog.driver)
+        self.identity_api = importutils.import_object(CONF.identity.driver)
+        self.token_api = importutils.import_object(CONF.token.driver)
+        self.catalog_api = importutils.import_object(CONF.catalog.driver)
 
     def load_fixtures(self, fixtures):
         """Hacky basic and naive fixture loading based on a python module.
@@ -256,8 +281,3 @@ class TestCase(unittest.TestCase):
     def add_path(self, path):
         sys.path.insert(0, path)
         self._paths.append(path)
-
-    def clear_module(self, module):
-        for x in sys.modules.keys():
-            if x.startswith(module):
-                del sys.modules[x]
